@@ -1,0 +1,14 @@
+[package]
+name = "progression"
+version = "0.1.0"
+authors = ["Christopher Chalmers <c.chalmers@me.com>"]
+edition = "2018"
+
+[dependencies]
+futures = "0.3.4"
+futures-timer = "3.0.2"
+term_size = "0.3.1"
+
+[dev-dependencies]
+async-fetcher = { git = "https://github.com/pop-os/async-fetcher" }
+surf = { git = "https://github.com/http-rs/surf" }
