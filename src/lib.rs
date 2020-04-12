@@ -25,15 +25,19 @@ pub struct ProgressBar {
 
 impl ProgressBar {
     pub fn tick(&self) {
-        let inner = &self.inner;
-        inner.current.fetch_add(1, Ordering::AcqRel);
-        inner.state.changed.store(true, Ordering::Release);
-        inner.state.waker.wake();
+        self.incr(1);
     }
 
     pub fn set(&self, val: usize) {
         let inner = &self.inner;
         inner.current.store(val, Ordering::Release);
+        inner.state.changed.store(true, Ordering::Release);
+        inner.state.waker.wake();
+    }
+
+    pub fn incr(&self, incr: usize) {
+        let inner = &self.inner;
+        inner.current.fetch_add(incr, Ordering::AcqRel);
         inner.state.changed.store(true, Ordering::Release);
         inner.state.waker.wake();
     }
