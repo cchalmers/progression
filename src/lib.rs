@@ -33,7 +33,7 @@ impl ProgressBar {
 
     pub fn set(&self, val: usize) {
         let inner = &self.inner;
-        inner.current.store(val, Ordering::AcqRel);
+        inner.current.store(val, Ordering::Release);
         inner.state.changed.store(true, Ordering::Release);
         inner.state.waker.wake();
     }
@@ -221,10 +221,10 @@ fn draw_bars(bars: &[ProgressBar], prev_num_bars: usize) {
         0
     };
     for bar in &bars[lower..] {
-        let current = bar.inner.current.load(Ordering::Acquire);
         let total = bar.inner.total.load(Ordering::Acquire);
+        let current = bar.inner.current.load(Ordering::Acquire);
         let len = 80;
-        let used = (len as f64 * (current as f64 / total as f64)).round() as usize;
+        let used = std::cmp::min(len, (len as f64 * (current as f64 / total as f64)).round() as usize);
         let remaining = len - used;
         writeln!(
             buffer,
