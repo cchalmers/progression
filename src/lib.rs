@@ -12,6 +12,7 @@ use std::time::Duration;
 struct ProgressBarInner {
     name: String,
     total: AtomicUsize,
+    finished: AtomicBool,
     current: AtomicUsize,
     // waker: Arc<AtomicWaker>,
     state: Arc<BarState>,
@@ -38,6 +39,13 @@ impl ProgressBar {
     pub fn incr(&self, incr: usize) {
         let inner = &self.inner;
         inner.current.fetch_add(incr, Ordering::AcqRel);
+        inner.state.changed.store(true, Ordering::Release);
+        inner.state.waker.wake();
+    }
+
+    pub fn finish(&self) {
+        let inner = &self.inner;
+        inner.finished.store(true, Ordering::Release);
         inner.state.changed.store(true, Ordering::Release);
         inner.state.waker.wake();
     }
@@ -86,6 +94,7 @@ impl MultiBarHandle {
     ) -> Result<ProgressBar, mpsc::TrySendError<ProgressBar>> {
         let inner = ProgressBarInner {
             name: builder.name,
+            finished: AtomicBool::new(false),
             current: AtomicUsize::new(builder.starting),
             total: AtomicUsize::new(builder.total),
             state: self.state.clone(),
@@ -207,6 +216,7 @@ impl Future for MultiBarFuture {
 pub const RED: &str = "\u{1b}[49;31m";
 pub const GREEN: &str = "\u{1b}[49;32m";
 pub const YELLOW: &str = "\u{1b}[49;33m";
+pub const BLUE: &str = "\u{1b}[49;34m";
 pub const CLEAR: &str = "\u{1b}[0m";
 
 fn draw_bars(bars: &[ProgressBar], prev_num_bars: usize) {
@@ -227,14 +237,27 @@ fn draw_bars(bars: &[ProgressBar], prev_num_bars: usize) {
     for bar in &bars[lower..] {
         let total = bar.inner.total.load(Ordering::Acquire);
         let current = bar.inner.current.load(Ordering::Acquire);
+        let finished = bar.inner.finished.load(Ordering::Acquire);
         let len = 80;
-        let used = std::cmp::min(len, (len as f64 * (current as f64 / total as f64)).round() as usize);
+        let used = std::cmp::min(
+            len,
+            (len as f64 * (current as f64 / total as f64)).round() as usize,
+        );
         let remaining = len - used;
+        let bar_colour = if finished {
+            if remaining == 0 {
+                GREEN
+            } else {
+                RED
+            }
+        } else {
+            BLUE
+        };
         writeln!(
             buffer,
             "{: >15} {}{:=>used$}{}{:->remaining$} {}/{}\x1b[0K",
             bar.inner.name,
-            GREEN,
+            bar_colour,
             "",
             CLEAR,
             "",
