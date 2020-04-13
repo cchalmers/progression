@@ -71,6 +71,45 @@ impl ProgressBarBuilder {
     }
 }
 
+struct WhenDoneInner {
+    done: AtomicBool,
+    waker: AtomicWaker,
+}
+
+/// Future that returns when the progress bar has handled the state when this was created
+/// (redrawing is necessary).
+pub struct WhenDone {
+    inner: Arc<WhenDoneInner>,
+}
+
+impl WhenDone {
+    fn new() -> (WhenDone, WhenDone) {
+        let inner = Arc::new(WhenDoneInner {
+            done: AtomicBool::new(false),
+            waker: AtomicWaker::new(),
+        });
+        (WhenDone { inner: inner.clone() }, WhenDone { inner })
+    }
+
+    fn done(&self) {
+        self.inner.done.store(true, Ordering::Release);
+        self.inner.waker.wake();
+    }
+}
+
+impl Future for WhenDone {
+    type Output = ();
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        let inner = &self.get_mut().inner;
+        inner.waker.register(&cx.waker());
+        if inner.done.load(Ordering::Acquire) {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
+    }
+}
+
 /// Shared state between the handle and runner.
 pub struct BarState {
     /// A signal that the multibar can finish on the next call to poll.
@@ -86,6 +125,7 @@ pub struct BarState {
 #[derive(Clone)]
 pub struct MultiBarHandle {
     bar_sender: mpsc::Sender<ProgressBar>,
+    when_done_sender: mpsc::Sender<WhenDone>,
     state: Arc<BarState>,
 }
 
@@ -121,10 +161,20 @@ impl MultiBarHandle {
     pub fn is_finished(&self) -> bool {
         self.state.done.load(Ordering::Acquire)
     }
+
+    /// When until a render at the current state (or a later state) has been performed.
+    // TODO deal with case where MultiBarFuture has already finished.
+    pub fn wait(&mut self) -> Result<WhenDone, mpsc::TrySendError<WhenDone>> {
+        let (future, when_done) = WhenDone::new();
+        self.when_done_sender.try_send(when_done)?;
+        self.state.waker.wake();
+        Ok(future)
+    }
 }
 
 pub fn multi_bar() -> (MultiBarHandle, MultiBarFuture) {
     let (bar_sender, bar_receiver) = mpsc::channel(128);
+    let (when_done_sender, when_done_receiver) = mpsc::channel(128);
     let shared_state = Arc::new(BarState {
         done: AtomicBool::new(false),
         changed: AtomicBool::new(false),
@@ -133,18 +183,21 @@ pub fn multi_bar() -> (MultiBarHandle, MultiBarFuture) {
     });
 
     let handle = MultiBarHandle {
+        when_done_sender,
         bar_sender,
         state: shared_state.clone(),
     };
     let future = MultiBarFuture {
         state: shared_state,
         bar_receiver,
+        when_done_receiver,
         waiting_delay: false,
         delay: Delay::new(Duration::from_millis(41)),
         finished_bars: vec![],
         active_bars: vec![],
         prev_num_bars: 0,
-        receiver_finished: false,
+        bar_receiver_finished: false,
+        done_receiver_finished: false,
     };
     (handle, future)
 }
@@ -158,6 +211,9 @@ pub struct MultiBarFuture {
     /// Receiver of new progress bars to add.
     bar_receiver: mpsc::Receiver<ProgressBar>,
 
+    /// Notify interested parties when a render has occured.
+    when_done_receiver: mpsc::Receiver<WhenDone>,
+
     /// A delay to prevent redrawing too fast.
     delay: Delay,
 
@@ -170,7 +226,8 @@ pub struct MultiBarFuture {
     /// The number of bars we drew last time (so we know how many lines to clear before redrawing).
     prev_num_bars: usize,
 
-    receiver_finished: bool,
+    bar_receiver_finished: bool,
+    done_receiver_finished: bool,
 }
 
 impl Future for MultiBarFuture {
@@ -192,6 +249,21 @@ impl Future for MultiBarFuture {
 
         let done = runner.state.done.load(Ordering::Acquire);
 
+        // See if anyone's waiting to hear back from us, tell them we're up to date. We queue them
+        // up here and notify after in case wait was called while rendering the bar.
+        let mut wd_queue = vec![];
+        if !runner.done_receiver_finished {
+            while let Ok(res) = runner.when_done_receiver.try_next() {
+                match res {
+                    Some(wd) => wd_queue.push(wd),
+                    None => {
+                        runner.done_receiver_finished = true;
+                        break;
+                    }
+                }
+            }
+        }
+
         // Check if the progress bar state has changed. If it has, store a `false` atomically.
         if runner
             .state
@@ -200,12 +272,12 @@ impl Future for MultiBarFuture {
         {
             // Collect any new bars added. If we see a none it means the sender has finished and we
             // shouldn't call `try_next` again.
-            if !runner.receiver_finished && !runner.state.done.load(Ordering::Acquire) {
+            if !runner.bar_receiver_finished && !runner.state.done.load(Ordering::Acquire) {
                 while let Ok(res) = runner.bar_receiver.try_next() {
                     match res {
                         Some(pb) => runner.active_bars.push(pb),
                         None => {
-                            runner.receiver_finished = true;
+                            runner.bar_receiver_finished = true;
                             break;
                         }
                     }
@@ -241,6 +313,8 @@ impl Future for MultiBarFuture {
             runner.prev_num_bars = runner.active_bars.len();
             runner.waiting_delay = true;
         }
+
+        wd_queue.iter().for_each(WhenDone::done);
 
         if done {
             return Poll::Ready(());
@@ -328,6 +402,7 @@ impl NoEcho {
         let fd = 0;
         let mut termios = Termios::from_fd(fd).unwrap();
         let original = termios.clone();
+        termios.c_iflag |= termios::IGNCR;
         termios.c_lflag &= !termios::ECHO;
         termios::tcsetattr(fd, termios::TCSAFLUSH, &termios).unwrap();
         NoEcho {
