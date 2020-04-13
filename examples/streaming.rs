@@ -83,9 +83,39 @@ fn main() {
         })
         .unwrap();
 
-    let _cap = progression::NoEcho::new();
+    let _cap = NoEcho::new();
     pool.run();
 
     println!();
     println!("Hello, world!");
+}
+
+/// This a questionable struct that prevents echoings and returns to stop people typing while our
+/// beautiful progress bars are being rendered, messing everything up. It's not really advisable to
+/// to this, one of the main reasons being that the shell inherits this behavour if the destructor
+/// isn't run. (One possible solution to this is to make a dtor function (using the ctor crate) or
+/// use std::rt::at_exit (unstable))
+pub struct NoEcho {
+    original: termios::Termios
+}
+
+impl NoEcho {
+    pub fn new() -> NoEcho {
+        use termios::*;
+        let fd = 0;
+        let mut termios = Termios::from_fd(fd).unwrap();
+        let original = termios.clone();
+        termios.c_iflag |= termios::IGNCR;
+        termios.c_lflag &= !termios::ECHO;
+        termios::tcsetattr(fd, termios::TCSAFLUSH, &termios).unwrap();
+        NoEcho {
+            original
+        }
+    }
+}
+
+impl Drop for NoEcho {
+    fn drop(&mut self) {
+        termios::tcsetattr(0, termios::TCSAFLUSH, &self.original).unwrap();
+    }
 }

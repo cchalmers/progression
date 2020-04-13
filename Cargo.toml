@@ -8,7 +8,6 @@ edition = "2018"
 futures = { version = "0.3.4", features = ["thread-pool"]}
 futures-timer = "3.0.2"
 term_size = "0.3.1"
-termios = "0.3.2"
 
 [dev-dependencies]
 async-fetcher = { git = "https://github.com/pop-os/async-fetcher" }
@@ -16,3 +15,4 @@ surf = { git = "https://github.com/http-rs/surf" }
 hyper = "0.13.4"
 tokio = {version = "0.2.17", features = ["macros"]}
 ctrlc = "3.1.4"
+termios = "0.3.2"

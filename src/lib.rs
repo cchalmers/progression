@@ -391,28 +391,3 @@ fn draw_bars(
     }
     eprint!("{}", buffer);
 }
-
-pub struct NoEcho {
-    original: termios::Termios
-}
-
-impl NoEcho {
-    pub fn new() -> NoEcho {
-        use termios::*;
-        let fd = 0;
-        let mut termios = Termios::from_fd(fd).unwrap();
-        let original = termios.clone();
-        termios.c_iflag |= termios::IGNCR;
-        termios.c_lflag &= !termios::ECHO;
-        termios::tcsetattr(fd, termios::TCSAFLUSH, &termios).unwrap();
-        NoEcho {
-            original
-        }
-    }
-}
-
-impl Drop for NoEcho {
-    fn drop(&mut self) {
-        termios::tcsetattr(0, termios::TCSAFLUSH, &self.original).unwrap();
-    }
-}
