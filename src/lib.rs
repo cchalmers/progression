@@ -129,7 +129,8 @@ pub fn multi_bar() -> (MultiBarHandle, MultiBarFuture) {
         bar_receiver,
         waiting_delay: false,
         delay: Delay::new(Duration::from_millis(41)),
-        bars: vec![],
+        finished_bars: vec![],
+        active_bars: vec![],
         prev_num_bars: 0,
         receiver_finished: false,
     };
@@ -149,7 +150,10 @@ pub struct MultiBarFuture {
     delay: Delay,
 
     /// Current stack of progress bars to draw.
-    bars: Vec<ProgressBar>,
+    finished_bars: Vec<ProgressBar>,
+
+    /// Current stack of progress bars to draw.
+    active_bars: Vec<ProgressBar>,
 
     /// The number of bars we drew last time (so we know how many lines to clear before redrawing).
     prev_num_bars: usize,
@@ -187,7 +191,7 @@ impl Future for MultiBarFuture {
             if !runner.receiver_finished {
                 while let Ok(res) = runner.bar_receiver.try_next() {
                     match res {
-                        Some(pb) => runner.bars.push(pb),
+                        Some(pb) => runner.active_bars.push(pb),
                         None => {
                             runner.receiver_finished = true;
                             break;
@@ -196,8 +200,25 @@ impl Future for MultiBarFuture {
                 }
             }
 
-            draw_bars(&runner.bars, runner.prev_num_bars);
-            runner.prev_num_bars = runner.bars.len();
+            let active = &mut runner.active_bars;
+            let finished = &mut runner.finished_bars;
+
+            let mut removed = 0;
+            for i in 0..active.len() {
+                let i = i - removed;
+                if active[i].inner.finished.load(Ordering::Acquire) {
+                    let bar = active.remove(i);
+                    finished.push(bar);
+                    removed += 1;
+                }
+            }
+
+            draw_bars(
+                active,
+                &finished[finished.len() - removed..],
+                runner.prev_num_bars,
+            );
+            runner.prev_num_bars = runner.active_bars.len();
             runner.waiting_delay = true;
         }
 
@@ -219,8 +240,12 @@ pub const YELLOW: &str = "\u{1b}[49;33m";
 pub const BLUE: &str = "\u{1b}[49;34m";
 pub const CLEAR: &str = "\u{1b}[0m";
 
-fn draw_bars(bars: &[ProgressBar], prev_num_bars: usize) {
-    if bars.is_empty() {
+fn draw_bars(
+    active_bars: &[ProgressBar],
+    newly_finished_bars: &[ProgressBar],
+    prev_num_bars: usize,
+) {
+    if active_bars.is_empty() && newly_finished_bars.is_empty() {
         return;
     }
     use std::fmt::Write;
@@ -229,12 +254,13 @@ fn draw_bars(bars: &[ProgressBar], prev_num_bars: usize) {
     if prev_num_bars != 0 {
         write!(buffer, "\x1b[{}A", std::cmp::min(max_height, prev_num_bars)).unwrap();
     }
-    let lower = if bars.len() > max_height {
-        bars.len() - max_height
+    let lower = if active_bars.len() > max_height {
+        active_bars.len() - max_height
     } else {
         0
     };
-    for bar in &bars[lower..] {
+    for bar in newly_finished_bars.iter().chain(active_bars) {
+        // for bar in &active_bars[lower..] {
         let total = bar.inner.total.load(Ordering::Acquire);
         let current = bar.inner.current.load(Ordering::Acquire);
         let finished = bar.inner.finished.load(Ordering::Acquire);
