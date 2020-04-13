@@ -77,6 +77,8 @@ pub struct BarState {
     done: AtomicBool,
     /// A signal the progress bar state has changed and we should redraw.
     changed: AtomicBool,
+    /// All currently active bars are considered finished. They will be drawn once more
+    finish_active: AtomicBool,
     /// Reference to our own waker so we can register new wakers.
     waker: AtomicWaker,
 }
@@ -106,9 +108,18 @@ impl MultiBarHandle {
         Ok(bar)
     }
 
-    pub fn finish(&mut self) {
+    pub fn finish_active(&self) {
+        self.state.finish_active.store(true, Ordering::Release);
+        self.state.waker.wake();
+    }
+
+    pub fn finish(&self) {
         self.state.done.store(true, Ordering::Release);
         self.state.waker.wake();
+    }
+
+    pub fn is_finished(&self) -> bool {
+        self.state.done.load(Ordering::Acquire)
     }
 }
 
@@ -117,6 +128,7 @@ pub fn multi_bar() -> (MultiBarHandle, MultiBarFuture) {
     let shared_state = Arc::new(BarState {
         done: AtomicBool::new(false),
         changed: AtomicBool::new(false),
+        finish_active: AtomicBool::new(false),
         waker: AtomicWaker::new(),
     });
 
@@ -188,7 +200,7 @@ impl Future for MultiBarFuture {
         {
             // Collect any new bars added. If we see a none it means the sender has finished and we
             // shouldn't call `try_next` again.
-            if !runner.receiver_finished {
+            if !runner.receiver_finished && !runner.state.done.load(Ordering::Acquire) {
                 while let Ok(res) = runner.bar_receiver.try_next() {
                     match res {
                         Some(pb) => runner.active_bars.push(pb),
@@ -204,12 +216,20 @@ impl Future for MultiBarFuture {
             let finished = &mut runner.finished_bars;
 
             let mut removed = 0;
-            for i in 0..active.len() {
-                let i = i - removed;
-                if active[i].inner.finished.load(Ordering::Acquire) {
-                    let bar = active.remove(i);
-                    finished.push(bar);
-                    removed += 1;
+
+            if runner.state.finish_active.compare_and_swap(true, false, Ordering::AcqRel) {
+                removed = active.len();
+                // eww
+                active.iter_mut().for_each(|bar| bar.inner.finished.store(true, Ordering::Relaxed));
+                finished.append(active);
+            } else {
+                for i in 0..active.len() {
+                    let i = i - removed;
+                    if active[i].inner.finished.load(Ordering::Acquire) {
+                        let bar = active.remove(i);
+                        finished.push(bar);
+                        removed += 1;
+                    }
                 }
             }
 
@@ -254,11 +274,12 @@ fn draw_bars(
     if prev_num_bars != 0 {
         write!(buffer, "\x1b[{}A", std::cmp::min(max_height, prev_num_bars)).unwrap();
     }
-    let lower = if active_bars.len() > max_height {
-        active_bars.len() - max_height
-    } else {
-        0
-    };
+    // TODO active can still more then max_height
+    // let lower = if active_bars.len() > max_height {
+    //     active_bars.len() - max_height
+    // } else {
+    //     0
+    // };
     for bar in newly_finished_bars.iter().chain(active_bars) {
         // for bar in &active_bars[lower..] {
         let total = bar.inner.total.load(Ordering::Acquire);
@@ -295,4 +316,28 @@ fn draw_bars(
         .unwrap();
     }
     eprint!("{}", buffer);
+}
+
+pub struct NoEcho {
+    original: termios::Termios
+}
+
+impl NoEcho {
+    pub fn new() -> NoEcho {
+        use termios::*;
+        let fd = 0;
+        let mut termios = Termios::from_fd(fd).unwrap();
+        let original = termios.clone();
+        termios.c_lflag &= !termios::ECHO;
+        termios::tcsetattr(fd, termios::TCSAFLUSH, &termios).unwrap();
+        NoEcho {
+            original
+        }
+    }
+}
+
+impl Drop for NoEcho {
+    fn drop(&mut self) {
+        termios::tcsetattr(0, termios::TCSAFLUSH, &self.original).unwrap();
+    }
 }

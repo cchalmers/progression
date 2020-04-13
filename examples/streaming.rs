@@ -35,12 +35,19 @@ fn main() {
         800_000, 1_384_291, 400_000, 213_321, 2_221_002, 392_292, 994_231,
     ];
 
-    let (mut handle, future) = progression::multi_bar();
+    let (handle, future) = progression::multi_bar();
+
+    let ctrlc_handle = handle.clone();
+    ctrlc::set_handler(move || {
+        let ctrlc_handle = ctrlc_handle.clone();
+        ctrlc_handle.finish_active();
+        ctrlc_handle.finish();
+    }).unwrap();
 
     let bars: Vec<_> = sizes
         .into_iter()
         .cycle()
-        .take(300)
+        .take(10)
         .enumerate()
         .map(|(i, size)| (i, size, handle.clone()))
         .collect();
@@ -53,11 +60,18 @@ fn main() {
     let stream = futures::stream::iter(bars)
         .map(|(i, size, mut handle)| async move {
             let builder = progression::ProgressBarBuilder::new(format!("dl_{}", i), size);
-            let bar = handle.add_bar(builder).unwrap();
-            for _ in 0_usize..bar.total() {
-                // Delay::new(Duration::from_millis(1));
-                yield_now().await;
-                bar.tick();
+            if let Ok(bar) = handle.add_bar(builder) {
+                for i in 0..std::cmp::min(1_200_000, bar.total()) {
+                    if i % 4096 == 0 {
+                        if handle.is_finished() {
+                            return
+                        }
+                    }
+                    // Delay::new(Duration::from_millis(1));
+                    yield_now().await;
+                    bar.tick();
+                }
+                bar.finish();
             }
         })
         .buffer_unordered(4);
@@ -69,9 +83,9 @@ fn main() {
         })
         .unwrap();
 
+    let _cap = progression::NoEcho::new();
     pool.run();
 
     println!();
     println!("Hello, world!");
 }
-
