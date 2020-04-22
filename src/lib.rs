@@ -5,12 +5,12 @@ use futures::task::AtomicWaker;
 use futures_timer::Delay;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
 struct ProgressBarInner {
-    name: String,
+    name: Arc<Mutex<String>>,
     total: AtomicUsize,
     finished: AtomicBool,
     current: AtomicUsize,
@@ -32,6 +32,20 @@ impl ProgressBar {
     pub fn set(&self, val: usize) {
         let inner = &self.inner;
         inner.current.store(val, Ordering::Release);
+        inner.state.changed.store(true, Ordering::Release);
+        inner.state.waker.wake();
+    }
+
+    pub fn update_total(&self, val: usize) {
+        let inner = &self.inner;
+        inner.total.store(val, Ordering::Release);
+        inner.state.changed.store(true, Ordering::Release);
+        inner.state.waker.wake();
+    }
+
+    pub fn update_name(&self, val: String) {
+        let inner = &self.inner;
+        *inner.name.lock().unwrap() = val;
         inner.state.changed.store(true, Ordering::Release);
         inner.state.waker.wake();
     }
@@ -135,7 +149,7 @@ impl MultiBarHandle {
         builder: ProgressBarBuilder,
     ) -> Result<ProgressBar, mpsc::TrySendError<ProgressBar>> {
         let inner = ProgressBarInner {
-            name: builder.name,
+            name: Arc::new(Mutex::new(builder.name)),
             finished: AtomicBool::new(false),
             current: AtomicUsize::new(builder.starting),
             total: AtomicUsize::new(builder.total),
@@ -356,6 +370,7 @@ fn draw_bars(
     // };
     for bar in newly_finished_bars.iter().chain(active_bars) {
         // for bar in &active_bars[lower..] {
+        let name = bar.inner.name.lock().unwrap();
         let total = bar.inner.total.load(Ordering::Acquire);
         let current = bar.inner.current.load(Ordering::Acquire);
         let finished = bar.inner.finished.load(Ordering::Acquire);
@@ -377,7 +392,7 @@ fn draw_bars(
         writeln!(
             buffer,
             "{: >15} {}{:=>used$}{}{:->remaining$} {}/{}\x1b[0K",
-            bar.inner.name,
+            &*name,
             bar_colour,
             "",
             CLEAR,
