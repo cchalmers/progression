@@ -13,6 +13,6 @@ term_size = "0.3.1"
 async-fetcher = { git = "https://github.com/pop-os/async-fetcher" }
 surf = { git = "https://github.com/http-rs/surf" }
 hyper = "0.13.4"
-tokio = {version = "0.2.17", features = ["macros"]}
+tokio = {version = "0.2.17", features = ["fs", "macros"]}
 ctrlc = "3.1.4"
 termios = "0.3.2"
