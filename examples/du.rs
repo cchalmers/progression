@@ -51,9 +51,15 @@ async fn get_size(name: String, start: DirEntry, bar: ProgressBar) -> Result<()>
 
         dirs_visited += 1;
 
-        bar.set(dirs_visited);
-        bar.update_total(dirs_to_visit);
-        bar.update_name(format!("{}: {}", name, bytes));
+        // Refresh less often
+        if dirs_visited == dirs_to_visit
+            || (dirs_to_visit < 100 && dirs_visited % 10 == 0)
+            || (dirs_to_visit < 1000 && dirs_visited % 100 == 0)
+            || dirs_visited % 1000 == 0 {
+            bar.set(dirs_visited);
+            bar.update_total(dirs_to_visit);
+            bar.update_name(format!("{}: {}", name, bytes));
+        }
     }
 
     bar.finish();
