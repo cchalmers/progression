@@ -49,11 +49,15 @@ impl CopyJob {
         let mut dirs = VecDeque::new();
         let mut files = Vec::new();
         let mut total_size = 0;
-        let descr = format!("{} -> {}", from.to_str().unwrap(), to.to_str().unwrap());
+        eprintln!("{} -> {}", from.to_str().unwrap(), to.to_str().unwrap());
 
         let mut to_visit = vec![from.clone()];
 
+        let scoping_bar = handle
+            .add_bar(ProgressBarBuilder::new("scoping".to_string(), 0))
+            .unwrap();
         while let Some(f) = to_visit.pop() {
+            scoping_bar.tick();
             let t = to.join(f.strip_prefix(&from).unwrap());
             let meta = fs::metadata(&f).await?;
             total_size += meta.len() as usize;
@@ -69,8 +73,9 @@ impl CopyJob {
                 files.push((f, t, meta.len() as usize))
             }
         }
+        scoping_bar.finish();
 
-        let bar_builder = ProgressBarBuilder::new(descr, total_size);
+        let bar_builder = ProgressBarBuilder::new("copying".to_string(), total_size);
         if let Ok(bar) = handle.add_bar(bar_builder) {
             Ok(Self { bar, dirs, files })
         } else {

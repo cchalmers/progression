@@ -14,9 +14,8 @@ struct ProgressBarInner {
     total: AtomicUsize,
     finished: AtomicBool,
     current: AtomicUsize,
-    // waker: Arc<AtomicWaker>,
+    rolling: AtomicUsize,
     state: Arc<MultiBarState>,
-    // done: Arc<AtomicBool>,
 }
 
 #[derive(Clone)]
@@ -62,6 +61,8 @@ pub struct ProgressBarBuilder {
 }
 
 impl ProgressBarBuilder {
+    /// A progress bar with the total size. If the total is 0, progress will be shown as a rolling
+    /// update.
     pub fn new(name: String, total: usize) -> ProgressBarBuilder {
         ProgressBarBuilder {
             name,
@@ -147,6 +148,7 @@ impl MultiBarHandle {
             finished: AtomicBool::new(false),
             current: AtomicUsize::new(builder.starting),
             total: AtomicUsize::new(builder.total),
+            rolling: AtomicUsize::new(0),
             state: self.state.clone(),
         };
         let bar = ProgressBar {
@@ -409,34 +411,58 @@ fn draw_bars(
         let current = bar.inner.current.load(Ordering::Acquire);
         let finished = bar.inner.finished.load(Ordering::Acquire);
         let len = 80;
-        let used = std::cmp::min(
-            len,
-            (len as f64 * (current as f64 / total as f64)).round() as usize,
-        );
-        let remaining = len - used;
-        let bar_colour = if finished {
-            if remaining == 0 {
-                GREEN
+        if total != 0 {
+            let used = std::cmp::min(
+                len,
+                (len as f64 * (current as f64 / total as f64)).round() as usize,
+            );
+            let remaining = len - used;
+            let bar_colour = if finished {
+                if remaining == 0 {
+                    GREEN
+                } else {
+                    RED
+                }
             } else {
-                RED
-            }
+                BLUE
+            };
+            writeln!(
+                buffer,
+                "{: >15} {}{:=>used$}{}{:->remaining$} {}/{}\x1b[0K",
+                bar.inner.name,
+                bar_colour,
+                "",
+                CLEAR,
+                "",
+                current,
+                total,
+                used = used,
+                remaining = remaining
+            )
+            .unwrap();
         } else {
-            BLUE
-        };
-        writeln!(
-            buffer,
-            "{: >15} {}{:=>used$}{}{:->remaining$} {}/{}\x1b[0K",
-            bar.inner.name,
-            bar_colour,
-            "",
-            CLEAR,
-            "",
-            current,
-            total,
-            used = used,
-            remaining = remaining
-        )
-        .unwrap();
+            let rolling = bar.inner.rolling.fetch_add(1, Ordering::Relaxed);
+            let start_point = rolling % len;
+            let line = if finished {
+                format!("{}{:=>len$}{}", GREEN, "", CLEAR, len = len)
+            } else {
+                let mut buffer = String::new();
+                for i in 0..len {
+                    if (i >= start_point && i < start_point + 10) || (i + len < start_point + 10) {
+                        write!(buffer, "{}={}", BLUE, CLEAR).unwrap()
+                    } else {
+                        buffer.push('-')
+                    }
+                }
+                buffer
+            };
+            writeln!(
+                buffer,
+                "{: >15} {} {}\x1b[0K",
+                bar.inner.name, line, current,
+            )
+            .unwrap();
+        }
     }
     eprint!("{}", buffer);
 }
