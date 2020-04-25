@@ -15,7 +15,7 @@ struct ProgressBarInner {
     finished: AtomicBool,
     current: AtomicUsize,
     // waker: Arc<AtomicWaker>,
-    state: Arc<BarState>,
+    state: Arc<MultiBarState>,
     // done: Arc<AtomicBool>,
 }
 
@@ -111,12 +111,13 @@ impl Future for WhenDone {
 }
 
 /// Shared state between the handle and runner.
-pub struct BarState {
+pub struct MultiBarState {
     /// A signal that the multibar can finish on the next call to poll.
     done: AtomicBool,
     /// A signal the progress bar state has changed and we should redraw.
     changed: AtomicBool,
-    /// All currently active bars are considered finished. They will be drawn once more
+    /// All currently active bars are considered finished. They will be drawn once more and never
+    /// again.
     finish_active: AtomicBool,
     /// Reference to our own waker so we can register new wakers.
     waker: AtomicWaker,
@@ -125,8 +126,8 @@ pub struct BarState {
 #[derive(Clone)]
 pub struct MultiBarHandle {
     bar_sender: mpsc::Sender<ProgressBar>,
-    when_done_sender: mpsc::Sender<WhenDone>,
-    state: Arc<BarState>,
+    when_done_sender: mpsc::UnboundedSender<WhenDone>,
+    state: Arc<MultiBarState>,
 }
 
 impl MultiBarHandle {
@@ -148,34 +149,48 @@ impl MultiBarHandle {
         Ok(bar)
     }
 
-    pub fn finish_active(&self) {
-        self.state.finish_active.store(true, Ordering::Release);
-        self.state.waker.wake();
-    }
-
+    /// Inform the MultiBar that it is done. It will render once more and then the future will
+    /// return a ready.
     pub fn finish(&self) {
         self.state.done.store(true, Ordering::Release);
         self.state.waker.wake();
     }
 
+    /// Check if the has been marked as finished (via `finish`).
     pub fn is_finished(&self) -> bool {
         self.state.done.load(Ordering::Acquire)
     }
 
-    /// When until a render at the current state (or a later state) has been performed.
-    // TODO deal with case where MultiBarFuture has already finished.
-    pub fn wait(&mut self) -> Result<WhenDone, mpsc::TrySendError<WhenDone>> {
-        let (future, when_done) = WhenDone::new();
-        self.when_done_sender.try_send(when_done)?;
+    /// All currently loaded bars will be marked as finished, if they're not complete the progress
+    /// bar will turn red. This is useful for when the work the multibar is tracking is
+    /// interrupted.
+    pub fn finish_active(&self) {
+        self.state.finish_active.store(true, Ordering::Release);
         self.state.waker.wake();
-        Ok(future)
+    }
+
+    /// When until a render at the current state (or a later state) has been performed. Returns
+    /// `None` if the `MultiBar` has been dropped.
+    pub fn wait(&mut self) -> Option<WhenDone> {
+        let (future, when_done) = WhenDone::new();
+        match self.when_done_sender.unbounded_send(when_done) {
+            Ok(()) => {
+                self.state.waker.wake();
+                Some(future)
+            }
+            Err(send_err) => {
+                // this should be the only case when an unbounded sender
+                assert!(send_err.is_disconnected());
+                None
+            }
+        }
     }
 }
 
 pub fn multi_bar() -> (MultiBarHandle, MultiBarFuture) {
     let (bar_sender, bar_receiver) = mpsc::channel(128);
-    let (when_done_sender, when_done_receiver) = mpsc::channel(128);
-    let shared_state = Arc::new(BarState {
+    let (when_done_sender, when_done_receiver) = mpsc::unbounded();
+    let shared_state = Arc::new(MultiBarState {
         done: AtomicBool::new(false),
         changed: AtomicBool::new(false),
         finish_active: AtomicBool::new(false),
@@ -203,7 +218,7 @@ pub fn multi_bar() -> (MultiBarHandle, MultiBarFuture) {
 }
 
 pub struct MultiBarFuture {
-    state: Arc<BarState>,
+    state: Arc<MultiBarState>,
 
     /// We're waiting on the delay before attemptint to do any redrawing.
     waiting_delay: bool,
@@ -212,7 +227,7 @@ pub struct MultiBarFuture {
     bar_receiver: mpsc::Receiver<ProgressBar>,
 
     /// Notify interested parties when a render has occured.
-    when_done_receiver: mpsc::Receiver<WhenDone>,
+    when_done_receiver: mpsc::UnboundedReceiver<WhenDone>,
 
     /// A delay to prevent redrawing too fast.
     delay: Delay,

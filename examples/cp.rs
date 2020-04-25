@@ -92,6 +92,8 @@ impl CopyJob {
             self.bar.incr(*size);
         }
 
+        self.bar.finish();
+
         Ok(())
     }
 }
