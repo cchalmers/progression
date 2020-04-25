@@ -88,7 +88,12 @@ impl WhenDone {
             done: AtomicBool::new(false),
             waker: AtomicWaker::new(),
         });
-        (WhenDone { inner: inner.clone() }, WhenDone { inner })
+        (
+            WhenDone {
+                inner: inner.clone(),
+            },
+            WhenDone { inner },
+        )
     }
 
     fn done(&self) {
@@ -119,6 +124,8 @@ pub struct MultiBarState {
     /// All currently active bars are considered finished. They will be drawn once more and never
     /// again.
     finish_active: AtomicBool,
+    /// Stop drawing the progress bar, can be resumed later.
+    stop: AtomicBool,
     /// Reference to our own waker so we can register new wakers.
     waker: AtomicWaker,
 }
@@ -147,6 +154,18 @@ impl MultiBarHandle {
         };
         self.bar_sender.try_send(bar.clone())?;
         Ok(bar)
+    }
+
+    /// Stop the multibar from rendering any more. Rendering may be resumed by setting `resume`.
+    pub fn stop(&self) {
+        self.state.stop.store(true, Ordering::Release);
+        self.state.waker.wake();
+    }
+
+    /// Resume multibar rendering.
+    pub fn resume(&self) {
+        self.state.stop.store(false, Ordering::Release);
+        self.state.waker.wake();
     }
 
     /// Inform the MultiBar that it is done. It will render once more and then the future will
@@ -194,6 +213,7 @@ pub fn multi_bar() -> (MultiBarHandle, MultiBarFuture) {
         done: AtomicBool::new(false),
         changed: AtomicBool::new(false),
         finish_active: AtomicBool::new(false),
+        stop: AtomicBool::new(false),
         waker: AtomicWaker::new(),
     });
 
@@ -213,6 +233,7 @@ pub fn multi_bar() -> (MultiBarHandle, MultiBarFuture) {
         prev_num_bars: 0,
         bar_receiver_finished: false,
         done_receiver_finished: false,
+        stopped: false,
     };
     (handle, future)
 }
@@ -243,6 +264,7 @@ pub struct MultiBarFuture {
 
     bar_receiver_finished: bool,
     done_receiver_finished: bool,
+    stopped: bool,
 }
 
 impl Future for MultiBarFuture {
@@ -263,6 +285,7 @@ impl Future for MultiBarFuture {
         runner.state.waker.register(&cx.waker());
 
         let done = runner.state.done.load(Ordering::Acquire);
+        runner.stopped = runner.state.stop.load(Ordering::Acquire);
 
         // See if anyone's waiting to hear back from us, tell them we're up to date. We queue them
         // up here and notify after in case wait was called while rendering the bar.
@@ -280,10 +303,11 @@ impl Future for MultiBarFuture {
         }
 
         // Check if the progress bar state has changed. If it has, store a `false` atomically.
-        if runner
-            .state
-            .changed
-            .compare_and_swap(true, false, Ordering::AcqRel)
+        if !runner.stopped
+            && runner
+                .state
+                .changed
+                .compare_and_swap(true, false, Ordering::AcqRel)
         {
             // Collect any new bars added. If we see a none it means the sender has finished and we
             // shouldn't call `try_next` again.
@@ -304,10 +328,16 @@ impl Future for MultiBarFuture {
 
             let mut removed = 0;
 
-            if runner.state.finish_active.compare_and_swap(true, false, Ordering::AcqRel) {
+            if runner
+                .state
+                .finish_active
+                .compare_and_swap(true, false, Ordering::AcqRel)
+            {
                 removed = active.len();
                 // eww
-                active.iter_mut().for_each(|bar| bar.inner.finished.store(true, Ordering::Relaxed));
+                active
+                    .iter_mut()
+                    .for_each(|bar| bar.inner.finished.store(true, Ordering::Relaxed));
                 finished.append(active);
             } else {
                 for i in 0..active.len() {
@@ -327,6 +357,10 @@ impl Future for MultiBarFuture {
             );
             runner.prev_num_bars = runner.active_bars.len();
             runner.waiting_delay = true;
+        }
+
+        if runner.stopped {
+            runner.prev_num_bars = 0;
         }
 
         wd_queue.iter().for_each(WhenDone::done);

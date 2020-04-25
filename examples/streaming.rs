@@ -1,8 +1,12 @@
 use futures::executor::LocalPool;
+use futures::stream::Stream;
 use futures::stream::StreamExt;
+use futures::task::AtomicWaker;
 use futures::task::LocalSpawnExt;
+use nix::sys::signal;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 
 /// Yield the current task to the back of the queue, giving others a chance.
@@ -29,6 +33,40 @@ async fn yield_now() {
     YieldNow { yielded: false }.await
 }
 
+// A ^Z handler. The StopStream will generate a stream a signals for every SIGTSTP.
+static TSTP: AtomicBool = AtomicBool::new(false);
+static STOP_TSTP: AtomicBool = AtomicBool::new(false);
+lazy_static::lazy_static! {
+    static ref TSTP_WAKER: AtomicWaker = AtomicWaker::new();
+}
+struct StopStream;
+impl StopStream {
+    fn stop() {
+        STOP_TSTP.store(true, Ordering::Release);
+        TSTP_WAKER.wake();
+    }
+}
+// Only ever have one active stream from this at once!
+impl Stream for StopStream {
+    type Item = ();
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<()>> {
+        TSTP_WAKER.register(&cx.waker());
+        if STOP_TSTP.load(Ordering::Acquire) {
+            Poll::Ready(None)
+        } else if TSTP.load(Ordering::Acquire) {
+            TSTP.store(false, Ordering::Release);
+            Poll::Ready(Some(()))
+        } else {
+            Poll::Pending
+        }
+    }
+}
+pub fn suspend() {
+    use nix::unistd::Pid;
+    // suspend the whole process group
+    signal::kill(Pid::from_raw(0), signal::SIGTSTP).unwrap();
+}
+
 fn main() {
     eprintln!("starting");
     let sizes = vec![
@@ -42,7 +80,24 @@ fn main() {
         let ctrlc_handle = ctrlc_handle.clone();
         ctrlc_handle.finish_active();
         ctrlc_handle.finish();
-    }).unwrap();
+    })
+    .unwrap();
+
+    // ^Z handler
+    // This will gracefully resume when `fg`ing. If you bg it will also resume but this is probably
+    // not what you want. It is possible to handle the bg case (by attempting to change the
+    // termios, which will send another interrupt if we're not in the foreground) but this starts
+    // to get gnarly so I'll leave it for now.
+    extern "C" fn sigstop_handler(_: i32) {
+        TSTP.store(true, Ordering::Release);
+        TSTP_WAKER.wake();
+    }
+    let sigstop = signal::SigAction::new(
+        signal::SigHandler::Handler(sigstop_handler),
+        signal::SaFlags::empty(),
+        signal::SigSet::empty(),
+    );
+    let mut old_action = unsafe { signal::sigaction(signal::Signal::SIGTSTP, &sigstop).unwrap() };
 
     let bars: Vec<_> = sizes
         .into_iter()
@@ -56,6 +111,22 @@ fn main() {
     let spawner = pool.spawner();
 
     spawner.spawn_local(future).unwrap();
+    let stp_handle = handle.clone();
+    spawner
+        .spawn_local(StopStream.for_each(move |_| {
+            let mut stp_handle = stp_handle.clone();
+            async move {
+                stp_handle.stop();
+                stp_handle.wait().unwrap().await;
+                let prev_action =
+                    unsafe { signal::sigaction(signal::Signal::SIGTSTP, &old_action).unwrap() };
+                suspend();
+                old_action =
+                    unsafe { signal::sigaction(signal::Signal::SIGTSTP, &prev_action).unwrap() };
+                stp_handle.resume();
+            }
+        }))
+        .unwrap();
 
     let stream = futures::stream::iter(bars)
         .map(|(i, size, mut handle)| async move {
@@ -64,7 +135,7 @@ fn main() {
                 for i in 0..std::cmp::min(1_200_000, bar.total()) {
                     if i % 4096 == 0 {
                         if handle.is_finished() {
-                            return
+                            return;
                         }
                     }
                     // Delay::new(Duration::from_millis(1));
@@ -79,7 +150,8 @@ fn main() {
     spawner
         .spawn_local(async move {
             stream.collect::<Vec<_>>().await;
-            handle.finish()
+            handle.finish();
+            StopStream::stop()
         })
         .unwrap();
 
@@ -96,7 +168,7 @@ fn main() {
 /// isn't run. (One possible solution to this is to make a dtor function (using the ctor crate) or
 /// use std::rt::at_exit (unstable))
 pub struct NoEcho {
-    original: termios::Termios
+    original: termios::Termios,
 }
 
 impl NoEcho {
@@ -108,9 +180,7 @@ impl NoEcho {
         termios.c_iflag |= termios::IGNCR;
         termios.c_lflag &= !termios::ECHO;
         termios::tcsetattr(fd, termios::TCSAFLUSH, &termios).unwrap();
-        NoEcho {
-            original
-        }
+        NoEcho { original }
     }
 }
 

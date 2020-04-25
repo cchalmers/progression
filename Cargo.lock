@@ -1019,6 +1019,8 @@ dependencies = [
  "futures 0.3.4",
  "futures-timer 3.0.2",
  "hyper",
+ "lazy_static",
+ "nix",
  "surf",
  "term_size",
  "termios",
