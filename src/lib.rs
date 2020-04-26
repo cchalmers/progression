@@ -9,6 +9,8 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
+pub mod draw;
+
 struct ProgressBarInner {
     name: String,
     total: AtomicUsize,
