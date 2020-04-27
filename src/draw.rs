@@ -1,79 +1,8 @@
-use bitfield::*;
-use futures::task::AtomicWaker;
 use std::fmt::Write;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
-bitfield! {
-    struct BarStateField(u8);
-    impl Debug;
-    /// Notify the handler that this bar has change and should be redrawn.
-    changed, set_changed: 0;
-
-    /// Mark this bar as finished. It will drawn once (before drawing any active bars) and left
-    /// there.
-    finished, set_finished: 1;
-
-    /// Clear this bar from the stack of bars. Draw will not be called while this is set. Changed
-    /// should be set when changing this parameter.
-    invisible, set_invisible: 2;
-}
-
-/// Shared state between the handle and runner.
-#[derive(Debug)]
-struct MultiBarStateInner {
-    field: AtomicUsize,
-    waker: AtomicWaker,
-}
-
-#[derive(Debug, Clone)]
-pub struct MultiBarState {
-    inner: Arc<MultiBarStateInner>,
-}
-
-impl MultiBarState {
-    fn update(&self, field: BarStateField) {
-        self.inner
-            .field
-            .fetch_or(field.0 as usize, Ordering::Release);
-        self.inner.waker.wake()
-    }
-
-    /// Finish the bar. I will be redrawn once more (assuming the multi bar gets polled again) and
-    /// never again.
-    pub fn finish(&self) {
-        let mut field = BarStateField(0);
-        field.set_changed(true);
-        field.set_finished(true);
-        self.update(field)
-    }
-
-    /// Mark the bar as being needed to be redrawn.
-    pub fn redraw(&self) {
-        let mut field = BarStateField(0);
-        field.set_changed(true);
-        self.update(field)
-    }
-}
-
-/// A bar that knows how to draw its self. The bar is stored in the MultiBarFuture, which calls
-/// `draw` when nessesary.
-pub trait DrawBar {
-    type Handle;
-    type Builder;
-
-    /// Build the bar given a handle for that bar. The `MultiBarState` will typically be stored in
-    /// the `Handle`.
-    fn build(builder: Self::Builder, multibar: MultiBarState) -> (Self::Handle, Self);
-
-    /// Draw the bar in its current state. The bar should only take a single line.
-    fn draw(&mut self) -> String;
-
-    /// This multibar handle has canceled all current progress bars. This can be used to change the
-    /// state of the bar so that the next time it's drawn it might look different (has default
-    /// implementation to do nothing).
-    fn cancel(&mut self) {}
-}
+use crate::{BarBuild, BarDraw, BarState};
 
 struct BoringBarState {
     total: AtomicUsize,
@@ -84,7 +13,7 @@ struct BoringBarState {
 /// A handle to the boring bar that can
 pub struct BoringBarHandle {
     state: Arc<BoringBarState>,
-    multibar: MultiBarState,
+    multibar: BarState,
 }
 
 /// The handle used to update the progress bar.
@@ -114,7 +43,7 @@ impl BoringBarHandle {
 }
 
 /// This is the `BoringBarDrawer`.
-struct BoringBarDrawer {
+pub struct BoringBarDrawer {
     name: String,
     draws: usize,
     state: Arc<BoringBarState>,
@@ -141,11 +70,11 @@ pub const YELLOW: &str = "\u{1b}[49;33m";
 pub const BLUE: &str = "\u{1b}[49;34m";
 pub const CLEAR: &str = "\u{1b}[0m";
 
-impl DrawBar for BoringBarDrawer {
+impl BarBuild for BoringBarDrawer {
     type Handle = BoringBarHandle;
     type Builder = BoringBarBuilder;
 
-    fn build(builder: Self::Builder, multibar: MultiBarState) -> (Self::Handle, Self) {
+    fn build(builder: Self::Builder, multibar: BarState) -> (Self::Handle, Self) {
         let state = Arc::new(BoringBarState {
             total: AtomicUsize::new(builder.total),
             current: AtomicUsize::new(0),
@@ -161,6 +90,16 @@ impl DrawBar for BoringBarDrawer {
             state,
         };
         (handle, drawer)
+    }
+}
+
+impl BarDraw for BoringBarDrawer {
+    fn finish(&self) {
+        self.state.finished.store(true, Ordering::Release)
+    }
+
+    fn is_finished(&self) -> bool {
+        self.state.finished.load(Ordering::Acquire)
     }
 
     fn draw(&mut self) -> String {

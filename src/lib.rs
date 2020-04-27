@@ -11,67 +11,91 @@ use std::time::Duration;
 
 pub mod draw;
 
-struct ProgressBarInner {
-    name: String,
-    total: AtomicUsize,
-    finished: AtomicBool,
-    current: AtomicUsize,
-    rolling: AtomicUsize,
-    state: Arc<MultiBarState>,
+bitfield::bitfield! {
+    struct BarStateField(u8);
+    impl Debug;
+    // /// Notify the handler that this bar has change and should be redrawn.
+    // changed, set_changed: 0;
+
+    /// Mark this bar as finished. It will drawn once (before drawing any active bars) and left
+    /// there.
+    finished, set_finished: 1;
+
+    /// Clear this bar from the stack of bars. Draw will not be called while this is set. Changed
+    /// should be set when changing this parameter.
+    invisible, set_invisible: 2;
 }
 
-#[derive(Clone)]
-pub struct ProgressBar {
-    inner: Arc<ProgressBarInner>,
+/// Shared state between the handle and runner.
+#[derive(Debug)]
+struct BarStateInner {
+    field: AtomicUsize,
+    mbs: Arc<MultiBarState>,
 }
 
-impl ProgressBar {
-    pub fn tick(&self) {
-        self.incr(1);
-    }
-
-    pub fn set(&self, val: usize) {
-        let inner = &self.inner;
-        inner.current.store(val, Ordering::Release);
-        inner.state.changed.store(true, Ordering::Release);
-        inner.state.waker.wake();
-    }
-
-    pub fn incr(&self, incr: usize) {
-        let inner = &self.inner;
-        inner.current.fetch_add(incr, Ordering::AcqRel);
-        inner.state.changed.store(true, Ordering::Release);
-        inner.state.waker.wake();
-    }
-
-    pub fn finish(&self) {
-        let inner = &self.inner;
-        inner.finished.store(true, Ordering::Release);
-        inner.state.changed.store(true, Ordering::Release);
-        inner.state.waker.wake();
-    }
-
-    pub fn total(&self) -> usize {
-        self.inner.total.load(Ordering::Acquire)
-    }
+#[derive(Debug, Clone)]
+pub struct BarState {
+    inner: Arc<BarStateInner>,
 }
 
-pub struct ProgressBarBuilder {
-    name: String,
-    total: usize,
-    starting: usize,
-}
-
-impl ProgressBarBuilder {
-    /// A progress bar with the total size. If the total is 0, progress will be shown as a rolling
-    /// update.
-    pub fn new(name: String, total: usize) -> ProgressBarBuilder {
-        ProgressBarBuilder {
-            name,
-            total,
-            starting: 0,
+impl BarState {
+    fn new(mbs: Arc<MultiBarState>) -> BarState {
+        BarState {
+            inner: Arc::new(BarStateInner {
+                field: AtomicUsize::new(0),
+                mbs,
+                // waker
+            }),
         }
     }
+    fn update(&self, field: BarStateField) {
+        self.inner
+            .field
+            .fetch_or(field.0 as usize, Ordering::Release);
+        self.inner.mbs.changed.store(true, Ordering::Release);
+        self.inner.mbs.waker.wake()
+    }
+
+    /// Finish the bar. I will be redrawn once more (assuming the multi bar gets polled again) and
+    /// never again.
+    pub fn finish(&self) {
+        let mut field = BarStateField(0);
+        // field.set_changed(true);
+        field.set_finished(true);
+        self.update(field)
+    }
+
+    /// Mark the bar as being needed to be redrawn.
+    pub fn redraw(&self) {
+        self.inner.mbs.changed.store(true, Ordering::Release);
+        self.inner.mbs.waker.wake()
+    }
+}
+
+/// A bar that knows how to draw its self. The bar is stored in the MultiBarFuture, which calls
+/// `draw` when nessesary.
+pub trait BarBuild {
+    type Handle;
+    type Builder;
+
+    /// Build the bar given a handle for that bar. The `BarState` will typically be stored in
+    /// the `Handle`.
+    fn build(builder: Self::Builder, multibar: BarState) -> (Self::Handle, Self);
+}
+
+/// A bar that knows how to draw its self. The bar is stored in the MultiBarFuture, which calls
+/// `draw` when nessesary.
+pub trait BarDraw: Send {
+    fn finish(&self);
+    fn is_finished(&self) -> bool;
+
+    /// Draw the bar in its current state. The bar should only take a single line.
+    fn draw(&mut self) -> String;
+
+    /// This multibar handle has canceled all current progress bars. This can be used to change the
+    /// state of the bar so that the next time it's drawn it might look different (has default
+    /// implementation to do nothing).
+    fn cancel(&mut self) {}
 }
 
 struct WhenDoneInner {
@@ -119,6 +143,7 @@ impl Future for WhenDone {
 }
 
 /// Shared state between the handle and runner.
+#[derive(Debug)]
 pub struct MultiBarState {
     /// A signal that the multibar can finish on the next call to poll.
     done: AtomicBool,
@@ -126,7 +151,7 @@ pub struct MultiBarState {
     changed: AtomicBool,
     /// All currently active bars are considered finished. They will be drawn once more and never
     /// again.
-    finish_active: AtomicBool,
+    abort_active: AtomicBool,
     /// Stop drawing the progress bar, can be resumed later.
     stop: AtomicBool,
     /// Reference to our own waker so we can register new wakers.
@@ -135,29 +160,21 @@ pub struct MultiBarState {
 
 #[derive(Clone)]
 pub struct MultiBarHandle {
-    bar_sender: mpsc::Sender<ProgressBar>,
+    bar_sender: mpsc::Sender<Box<dyn BarDraw>>,
     when_done_sender: mpsc::UnboundedSender<WhenDone>,
     state: Arc<MultiBarState>,
 }
 
 impl MultiBarHandle {
-    pub fn add_bar(
+    pub fn add_bar<B: BarBuild + BarDraw + 'static>(
         &mut self,
-        builder: ProgressBarBuilder,
-    ) -> Result<ProgressBar, mpsc::TrySendError<ProgressBar>> {
-        let inner = ProgressBarInner {
-            name: builder.name,
-            finished: AtomicBool::new(false),
-            current: AtomicUsize::new(builder.starting),
-            total: AtomicUsize::new(builder.total),
-            rolling: AtomicUsize::new(0),
-            state: self.state.clone(),
-        };
-        let bar = ProgressBar {
-            inner: Arc::new(inner),
-        };
-        self.bar_sender.try_send(bar.clone())?;
-        Ok(bar)
+        builder: B::Builder,
+    ) -> Result<B::Handle, mpsc::TrySendError<Box<dyn BarDraw>>> {
+        // fn build(builder: Self::Builder, multibar: BarState) -> (Self::Handle, Self);
+        let bar_state = BarState::new(self.state.clone());
+        let (handle, drawer) = B::build(builder, bar_state);
+        self.bar_sender.try_send(Box::new(drawer))?;
+        Ok(handle)
     }
 
     /// Stop the multibar from rendering any more. Rendering may be resumed by setting `resume`.
@@ -184,11 +201,10 @@ impl MultiBarHandle {
         self.state.done.load(Ordering::Acquire)
     }
 
-    /// All currently loaded bars will be marked as finished, if they're not complete the progress
-    /// bar will turn red. This is useful for when the work the multibar is tracking is
-    /// interrupted.
-    pub fn finish_active(&self) {
-        self.state.finish_active.store(true, Ordering::Release);
+    /// All currently loaded bars will be marked as aborted. Bar may be rendered differently when
+    /// aborted. This is useful for when the work the multibar is tracking is interrupted.
+    pub fn abort_active(&self) {
+        self.state.abort_active.store(true, Ordering::Release);
         self.state.waker.wake();
     }
 
@@ -216,7 +232,7 @@ pub fn multi_bar() -> (MultiBarHandle, MultiBarFuture) {
     let shared_state = Arc::new(MultiBarState {
         done: AtomicBool::new(false),
         changed: AtomicBool::new(false),
-        finish_active: AtomicBool::new(false),
+        abort_active: AtomicBool::new(false),
         stop: AtomicBool::new(false),
         waker: AtomicWaker::new(),
     });
@@ -242,6 +258,8 @@ pub fn multi_bar() -> (MultiBarHandle, MultiBarFuture) {
     (handle, future)
 }
 
+type BarDrawer = Box<dyn BarDraw>;
+
 pub struct MultiBarFuture {
     state: Arc<MultiBarState>,
 
@@ -249,7 +267,7 @@ pub struct MultiBarFuture {
     waiting_delay: bool,
 
     /// Receiver of new progress bars to add.
-    bar_receiver: mpsc::Receiver<ProgressBar>,
+    bar_receiver: mpsc::Receiver<BarDrawer>,
 
     /// Notify interested parties when a render has occured.
     when_done_receiver: mpsc::UnboundedReceiver<WhenDone>,
@@ -258,10 +276,10 @@ pub struct MultiBarFuture {
     delay: Delay,
 
     /// Current stack of progress bars to draw.
-    finished_bars: Vec<ProgressBar>,
+    finished_bars: Vec<BarDrawer>,
 
     /// Current stack of progress bars to draw.
-    active_bars: Vec<ProgressBar>,
+    active_bars: Vec<BarDrawer>,
 
     /// The number of bars we drew last time (so we know how many lines to clear before redrawing).
     prev_num_bars: usize,
@@ -334,19 +352,17 @@ impl Future for MultiBarFuture {
 
             if runner
                 .state
-                .finish_active
+                .abort_active
                 .compare_and_swap(true, false, Ordering::AcqRel)
             {
                 removed = active.len();
                 // eww
-                active
-                    .iter_mut()
-                    .for_each(|bar| bar.inner.finished.store(true, Ordering::Relaxed));
+                active.iter_mut().for_each(|bar| bar.finish());
                 finished.append(active);
             } else {
                 for i in 0..active.len() {
                     let i = i - removed;
-                    if active[i].inner.finished.load(Ordering::Acquire) {
+                    if active[i].is_finished() {
                         let bar = active.remove(i);
                         finished.push(bar);
                         removed += 1;
@@ -354,11 +370,8 @@ impl Future for MultiBarFuture {
                 }
             }
 
-            draw_bars(
-                active,
-                &finished[finished.len() - removed..],
-                runner.prev_num_bars,
-            );
+            let len = finished.len();
+            draw_bars(active, &mut finished[len - removed..], runner.prev_num_bars);
             runner.prev_num_bars = runner.active_bars.len();
             runner.waiting_delay = true;
         }
@@ -381,15 +394,9 @@ impl Future for MultiBarFuture {
     }
 }
 
-pub const RED: &str = "\u{1b}[49;31m";
-pub const GREEN: &str = "\u{1b}[49;32m";
-pub const YELLOW: &str = "\u{1b}[49;33m";
-pub const BLUE: &str = "\u{1b}[49;34m";
-pub const CLEAR: &str = "\u{1b}[0m";
-
 fn draw_bars(
-    active_bars: &[ProgressBar],
-    newly_finished_bars: &[ProgressBar],
+    active_bars: &mut [Box<dyn BarDraw>],
+    newly_finished_bars: &mut [Box<dyn BarDraw>],
     prev_num_bars: usize,
 ) {
     if active_bars.is_empty() && newly_finished_bars.is_empty() {
@@ -407,64 +414,8 @@ fn draw_bars(
     // } else {
     //     0
     // };
-    for bar in newly_finished_bars.iter().chain(active_bars) {
-        // for bar in &active_bars[lower..] {
-        let total = bar.inner.total.load(Ordering::Acquire);
-        let current = bar.inner.current.load(Ordering::Acquire);
-        let finished = bar.inner.finished.load(Ordering::Acquire);
-        let len = 80;
-        if total != 0 {
-            let used = std::cmp::min(
-                len,
-                (len as f64 * (current as f64 / total as f64)).round() as usize,
-            );
-            let remaining = len - used;
-            let bar_colour = if finished {
-                if remaining == 0 {
-                    GREEN
-                } else {
-                    RED
-                }
-            } else {
-                BLUE
-            };
-            writeln!(
-                buffer,
-                "{: >15} {}{:=>used$}{}{:->remaining$} {}/{}\x1b[0K",
-                bar.inner.name,
-                bar_colour,
-                "",
-                CLEAR,
-                "",
-                current,
-                total,
-                used = used,
-                remaining = remaining
-            )
-            .unwrap();
-        } else {
-            let rolling = bar.inner.rolling.fetch_add(1, Ordering::Relaxed);
-            let start_point = rolling % len;
-            let line = if finished {
-                format!("{}{:=>len$}{}", GREEN, "", CLEAR, len = len)
-            } else {
-                let mut buffer = String::new();
-                for i in 0..len {
-                    if (i >= start_point && i < start_point + 10) || (i + len < start_point + 10) {
-                        write!(buffer, "{}={}", BLUE, CLEAR).unwrap()
-                    } else {
-                        buffer.push('-')
-                    }
-                }
-                buffer
-            };
-            writeln!(
-                buffer,
-                "{: >15} {} {}\x1b[0K",
-                bar.inner.name, line, current,
-            )
-            .unwrap();
-        }
+    for bar in newly_finished_bars.iter_mut().chain(active_bars) {
+        write!(buffer, "{}", bar.draw()).unwrap();
     }
     eprint!("{}", buffer);
 }

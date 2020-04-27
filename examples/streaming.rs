@@ -78,7 +78,7 @@ fn main() {
     let ctrlc_handle = handle.clone();
     ctrlc::set_handler(move || {
         let ctrlc_handle = ctrlc_handle.clone();
-        ctrlc_handle.finish_active();
+        ctrlc_handle.abort_active();
         ctrlc_handle.finish();
     })
     .unwrap();
@@ -131,8 +131,8 @@ fn main() {
     let stream = futures::stream::iter(bars)
         .map(|(i, size, mut handle)| async move {
             let sz = if size > 1_200_000 { 0 } else { size };
-            let builder = progression::ProgressBarBuilder::new(format!("dl_{}", i), sz);
-            if let Ok(bar) = handle.add_bar(builder) {
+            let builder = progression::draw::BoringBarBuilder::new(format!("dl_{}", i), sz);
+            if let Ok(bar) = handle.add_bar::<progression::draw::BoringBarDrawer>(builder) {
                 for i in 0..std::cmp::min(1_200_000, size) {
                     if i % 4096 == 0 {
                         if handle.is_finished() {

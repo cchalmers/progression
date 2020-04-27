@@ -4,7 +4,8 @@ use std::path::PathBuf;
 use tokio::fs;
 use tokio::io;
 
-use progression::{multi_bar, MultiBarHandle, ProgressBar, ProgressBarBuilder};
+use progression::draw::{BoringBarBuilder, BoringBarDrawer, BoringBarHandle};
+use progression::{multi_bar, MultiBarHandle};
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
@@ -32,7 +33,7 @@ async fn main() -> io::Result<()> {
 }
 
 struct CopyJob {
-    bar: ProgressBar,
+    bar: BoringBarHandle,
     dirs: VecDeque<(PathBuf, usize)>,
     files: Vec<(PathBuf, PathBuf, usize)>,
 }
@@ -53,8 +54,8 @@ impl CopyJob {
 
         let mut to_visit = vec![from.clone()];
 
-        let scoping_bar = handle
-            .add_bar(ProgressBarBuilder::new("scoping".to_string(), 0))
+        let scoping_bar: BoringBarHandle = handle
+            .add_bar::<BoringBarDrawer>(BoringBarBuilder::new("scoping".to_string(), 0))
             .unwrap();
         while let Some(f) = to_visit.pop() {
             scoping_bar.tick();
@@ -75,8 +76,8 @@ impl CopyJob {
         }
         scoping_bar.finish();
 
-        let bar_builder = ProgressBarBuilder::new("copying".to_string(), total_size);
-        if let Ok(bar) = handle.add_bar(bar_builder) {
+        let bar_builder = BoringBarBuilder::new("copying".to_string(), total_size);
+        if let Ok(bar) = handle.add_bar::<BoringBarDrawer>(bar_builder) {
             Ok(Self { bar, dirs, files })
         } else {
             Err(io::Error::new(
