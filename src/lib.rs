@@ -83,17 +83,31 @@ pub trait BarBuild {
     fn build(self, multibar: BarState) -> (Self::Handle, Self::Drawer);
 }
 
+/// Parameters from the hander.
+pub struct BarDrawParams {
+    aborted: bool,
+    finished: bool,
+}
+
+impl BarDrawParams {
+    /// Has this bar been aborted by the handler?
+    pub fn aborted(&self) -> bool {
+        self.aborted
+    }
+
+    /// Has this bar been finished by the handler?
+    pub fn finished(&self) -> bool {
+        self.finished
+    }
+}
+
 /// A bar that knows how to draw itself. The bar is stored in the MultiBarFuture, which calls
 /// `draw` when nessesary.
 pub trait BarDraw: Send {
-    fn finish(&self);
-    fn abort(&self) {
-        self.finish()
-    }
     fn is_finished(&self) -> bool;
 
     /// Draw the bar in its current state. The bar should only take a single line.
-    fn draw(&mut self) -> String;
+    fn draw(&mut self, params: &BarDrawParams) -> String;
 
     /// This multibar handle has canceled all current progress bars. This can be used to change the
     /// state of the bar so that the next time it's drawn it might look different (has default
@@ -171,7 +185,7 @@ pub struct MultiBarHandle {
 impl MultiBarHandle {
     pub fn add_bar<B: BarBuild + 'static>(
         &mut self,
-        builder: B
+        builder: B,
     ) -> Result<B::Handle, mpsc::TrySendError<Box<dyn BarDraw>>> {
         let bar_state = BarState::new(self.state.clone());
         let (handle, drawer) = builder.build(bar_state);
@@ -352,14 +366,18 @@ impl Future for MultiBarFuture {
 
             let mut removed = 0;
 
+            let mut params = BarDrawParams {
+                finished: done,
+                aborted: false,
+            };
+
             if runner
                 .state
                 .abort_active
                 .compare_and_swap(true, false, Ordering::AcqRel)
             {
                 removed = active.len();
-                // eww
-                active.iter_mut().for_each(|bar| bar.abort());
+                params.aborted = true;
                 finished.append(active);
             } else {
                 for i in 0..active.len() {
@@ -373,7 +391,12 @@ impl Future for MultiBarFuture {
             }
 
             let len = finished.len();
-            draw_bars(active, &mut finished[len - removed..], runner.prev_num_bars);
+            draw_bars(
+                active,
+                &mut finished[len - removed..],
+                runner.prev_num_bars,
+                params,
+            );
             runner.prev_num_bars = runner.active_bars.len();
             runner.waiting_delay = true;
         }
@@ -400,6 +423,7 @@ fn draw_bars(
     active_bars: &mut [Box<dyn BarDraw>],
     newly_finished_bars: &mut [Box<dyn BarDraw>],
     prev_num_bars: usize,
+    params: BarDrawParams,
 ) {
     if active_bars.is_empty() && newly_finished_bars.is_empty() {
         return;
@@ -417,7 +441,7 @@ fn draw_bars(
     //     0
     // };
     for bar in newly_finished_bars.iter_mut().chain(active_bars) {
-        write!(buffer, "{}", bar.draw()).unwrap();
+        write!(buffer, "{}", bar.draw(&params)).unwrap();
     }
     eprint!("{}", buffer);
 }

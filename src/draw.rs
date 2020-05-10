@@ -2,7 +2,7 @@ use std::fmt::Write;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use crate::{BarBuild, BarDraw, BarState};
+use crate::{BarBuild, BarDraw, BarDrawParams, BarState};
 
 struct BoringBarState {
     total: AtomicUsize,
@@ -11,7 +11,8 @@ struct BoringBarState {
     aborted: AtomicBool,
 }
 
-/// A handle to the boring bar that can
+/// A handle to the boring bar that can used to update the progress of the bar.
+#[derive(Clone)]
 pub struct BoringBarHandle {
     state: Arc<BoringBarState>,
     multibar: BarState,
@@ -41,13 +42,6 @@ impl BoringBarHandle {
         self.state.finished.store(true, Ordering::Release);
         self.multibar.redraw()
     }
-}
-
-/// This is the `BoringBarDrawer`.
-pub struct BoringBarDrawer {
-    name: String,
-    draws: usize,
-    state: Arc<BoringBarState>,
 }
 
 /// A builder for the boring bar. Right now you can only speicify a name and a total. Use a total
@@ -95,26 +89,34 @@ impl BarBuild for BoringBarBuilder {
     }
 }
 
+/// This is the `BoringBarDrawer`.
+pub struct BoringBarDrawer {
+    name: String,
+    draws: usize,
+    state: Arc<BoringBarState>,
+}
+
 impl BarDraw for BoringBarDrawer {
-    fn finish(&self) {
-        self.state.finished.store(true, Ordering::Release)
-    }
-
-    fn abort(&self) {
-        self.state.aborted.store(true, Ordering::Release)
-    }
-
     fn is_finished(&self) -> bool {
         self.state.finished.load(Ordering::Acquire)
     }
 
-    fn draw(&mut self) -> String {
-        let mut buffer = String::new();
+    fn draw(&mut self, params: &BarDrawParams) -> String {
         let total = self.state.total.load(Ordering::Acquire);
         let current = self.state.current.load(Ordering::Acquire);
-        let finished = self.state.finished.load(Ordering::Acquire);
-        let aborted = self.state.aborted.load(Ordering::Acquire);
+        let was_finished = self
+            .state
+            .finished
+            .fetch_or(params.finished(), Ordering::Acquire);
+        let was_aborted = self
+            .state
+            .aborted
+            .fetch_or(params.aborted(), Ordering::Acquire);
+        let finished = was_finished || params.finished();
+        let aborted = was_aborted || params.aborted();
         let len = 60;
+
+        let mut buffer = String::new();
         if total != 0 {
             let used = std::cmp::min(
                 len,
