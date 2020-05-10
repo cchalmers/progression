@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use tokio::fs;
 use tokio::io;
 
-use progression::draw::{BoringBarBuilder, BoringBarDrawer, BoringBarHandle};
+use progression::draw::{BoringBarBuilder, BoringBarHandle};
 use progression::{multi_bar, MultiBarHandle};
 
 #[tokio::main]
@@ -55,7 +55,7 @@ impl CopyJob {
         let mut to_visit = vec![from.clone()];
 
         let scoping_bar: BoringBarHandle = handle
-            .add_bar::<BoringBarDrawer>(BoringBarBuilder::new("scoping".to_string(), 0))
+            .add_bar(BoringBarBuilder::new("scoping".to_string(), 0))
             .unwrap();
         while let Some(f) = to_visit.pop() {
             scoping_bar.tick();
@@ -77,7 +77,7 @@ impl CopyJob {
         scoping_bar.finish();
 
         let bar_builder = BoringBarBuilder::new("copying".to_string(), total_size);
-        if let Ok(bar) = handle.add_bar::<BoringBarDrawer>(bar_builder) {
+        if let Ok(bar) = handle.add_bar(bar_builder) {
             Ok(Self { bar, dirs, files })
         } else {
             Err(io::Error::new(

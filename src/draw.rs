@@ -70,13 +70,13 @@ pub const YELLOW: &str = "\u{1b}[49;33m";
 pub const BLUE: &str = "\u{1b}[49;34m";
 pub const CLEAR: &str = "\u{1b}[0m";
 
-impl BarBuild for BoringBarDrawer {
+impl BarBuild for BoringBarBuilder {
     type Handle = BoringBarHandle;
-    type Builder = BoringBarBuilder;
+    type Drawer = BoringBarDrawer;
 
-    fn build(builder: Self::Builder, multibar: BarState) -> (Self::Handle, Self) {
+    fn build(self, multibar: BarState) -> (Self::Handle, Self::Drawer) {
         let state = Arc::new(BoringBarState {
-            total: AtomicUsize::new(builder.total),
+            total: AtomicUsize::new(self.total),
             current: AtomicUsize::new(0),
             finished: AtomicBool::new(false),
         });
@@ -85,7 +85,7 @@ impl BarBuild for BoringBarDrawer {
             multibar,
         };
         let drawer = BoringBarDrawer {
-            name: builder.name,
+            name: self.name,
             draws: 0,
             state,
         };
@@ -107,7 +107,7 @@ impl BarDraw for BoringBarDrawer {
         let total = self.state.total.load(Ordering::Acquire);
         let current = self.state.current.load(Ordering::Acquire);
         let finished = self.state.finished.load(Ordering::Acquire);
-        let len = 80;
+        let len = 60;
         if total != 0 {
             let used = std::cmp::min(
                 len,

@@ -132,7 +132,7 @@ fn main() {
         .map(|(i, size, mut handle)| async move {
             let sz = if size > 1_200_000 { 0 } else { size };
             let builder = progression::draw::BoringBarBuilder::new(format!("dl_{}", i), sz);
-            if let Ok(bar) = handle.add_bar::<progression::draw::BoringBarDrawer>(builder) {
+            if let Ok(bar) = handle.add_bar(builder) {
                 for i in 0..std::cmp::min(1_200_000, size) {
                     if i % 4096 == 0 {
                         if handle.is_finished() {

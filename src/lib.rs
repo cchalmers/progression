@@ -56,7 +56,7 @@ impl BarState {
         self.inner.mbs.waker.wake()
     }
 
-    /// Finish the bar. I will be redrawn once more (assuming the multi bar gets polled again) and
+    /// Finish the bar. It will be redrawn once more (assuming the multi bar gets polled again) and
     /// never again.
     pub fn finish(&self) {
         let mut field = BarStateField(0);
@@ -72,18 +72,18 @@ impl BarState {
     }
 }
 
-/// A bar that knows how to draw its self. The bar is stored in the MultiBarFuture, which calls
+/// A bar that knows how to draw itself. The bar is stored in the MultiBarFuture, which calls
 /// `draw` when nessesary.
 pub trait BarBuild {
     type Handle;
-    type Builder;
+    type Drawer: BarDraw;
 
     /// Build the bar given a handle for that bar. The `BarState` will typically be stored in
     /// the `Handle`.
-    fn build(builder: Self::Builder, multibar: BarState) -> (Self::Handle, Self);
+    fn build(self, multibar: BarState) -> (Self::Handle, Self::Drawer);
 }
 
-/// A bar that knows how to draw its self. The bar is stored in the MultiBarFuture, which calls
+/// A bar that knows how to draw itself. The bar is stored in the MultiBarFuture, which calls
 /// `draw` when nessesary.
 pub trait BarDraw: Send {
     fn finish(&self);
@@ -166,13 +166,12 @@ pub struct MultiBarHandle {
 }
 
 impl MultiBarHandle {
-    pub fn add_bar<B: BarBuild + BarDraw + 'static>(
+    pub fn add_bar<B: BarBuild + 'static>(
         &mut self,
-        builder: B::Builder,
+        builder: B
     ) -> Result<B::Handle, mpsc::TrySendError<Box<dyn BarDraw>>> {
-        // fn build(builder: Self::Builder, multibar: BarState) -> (Self::Handle, Self);
         let bar_state = BarState::new(self.state.clone());
-        let (handle, drawer) = B::build(builder, bar_state);
+        let (handle, drawer) = builder.build(bar_state);
         self.bar_sender.try_send(Box::new(drawer))?;
         Ok(handle)
     }
