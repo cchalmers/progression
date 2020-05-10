@@ -124,6 +124,8 @@ impl BarDraw for BoringBarDrawer {
             );
             let remaining = len - used;
             let bar_colour = if aborted {
+                RED
+            } else if finished {
                 if remaining == 0 {
                     GREEN
                 } else {

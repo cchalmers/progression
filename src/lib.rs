@@ -388,12 +388,7 @@ impl Future for MultiBarFuture {
                 }
             }
 
-            draw_bars(
-                active,
-                finished,
-                runner.prev_num_bars,
-                params,
-            );
+            draw_bars(active, finished, runner.prev_num_bars, params);
             finished.clear();
             runner.prev_num_bars = runner.active_bars.len();
             runner.waiting_delay = true;
