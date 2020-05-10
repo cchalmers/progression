@@ -364,8 +364,6 @@ impl Future for MultiBarFuture {
             let active = &mut runner.active_bars;
             let finished = &mut runner.finished_bars;
 
-            let mut removed = 0;
-
             let mut params = BarDrawParams {
                 finished: done,
                 aborted: false,
@@ -376,10 +374,10 @@ impl Future for MultiBarFuture {
                 .abort_active
                 .compare_and_swap(true, false, Ordering::AcqRel)
             {
-                removed = active.len();
                 params.aborted = true;
                 finished.append(active);
             } else {
+                let mut removed = 0;
                 for i in 0..active.len() {
                     let i = i - removed;
                     if active[i].is_finished() {
@@ -390,13 +388,13 @@ impl Future for MultiBarFuture {
                 }
             }
 
-            let len = finished.len();
             draw_bars(
                 active,
-                &mut finished[len - removed..],
+                finished,
                 runner.prev_num_bars,
                 params,
             );
+            finished.clear();
             runner.prev_num_bars = runner.active_bars.len();
             runner.waiting_delay = true;
         }
