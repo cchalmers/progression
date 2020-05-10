@@ -87,6 +87,9 @@ pub trait BarBuild {
 /// `draw` when nessesary.
 pub trait BarDraw: Send {
     fn finish(&self);
+    fn abort(&self) {
+        self.finish()
+    }
     fn is_finished(&self) -> bool;
 
     /// Draw the bar in its current state. The bar should only take a single line.
@@ -356,7 +359,7 @@ impl Future for MultiBarFuture {
             {
                 removed = active.len();
                 // eww
-                active.iter_mut().for_each(|bar| bar.finish());
+                active.iter_mut().for_each(|bar| bar.abort());
                 finished.append(active);
             } else {
                 for i in 0..active.len() {

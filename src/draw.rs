@@ -8,6 +8,7 @@ struct BoringBarState {
     total: AtomicUsize,
     current: AtomicUsize,
     finished: AtomicBool,
+    aborted: AtomicBool,
 }
 
 /// A handle to the boring bar that can
@@ -79,6 +80,7 @@ impl BarBuild for BoringBarBuilder {
             total: AtomicUsize::new(self.total),
             current: AtomicUsize::new(0),
             finished: AtomicBool::new(false),
+            aborted: AtomicBool::new(false),
         });
         let handle = BoringBarHandle {
             state: state.clone(),
@@ -98,6 +100,10 @@ impl BarDraw for BoringBarDrawer {
         self.state.finished.store(true, Ordering::Release)
     }
 
+    fn abort(&self) {
+        self.state.aborted.store(true, Ordering::Release)
+    }
+
     fn is_finished(&self) -> bool {
         self.state.finished.load(Ordering::Acquire)
     }
@@ -107,6 +113,7 @@ impl BarDraw for BoringBarDrawer {
         let total = self.state.total.load(Ordering::Acquire);
         let current = self.state.current.load(Ordering::Acquire);
         let finished = self.state.finished.load(Ordering::Acquire);
+        let aborted = self.state.aborted.load(Ordering::Acquire);
         let len = 60;
         if total != 0 {
             let used = std::cmp::min(
@@ -114,7 +121,7 @@ impl BarDraw for BoringBarDrawer {
                 (len as f64 * (current as f64 / total as f64)).round() as usize,
             );
             let remaining = len - used;
-            let bar_colour = if finished {
+            let bar_colour = if aborted {
                 if remaining == 0 {
                     GREEN
                 } else {
@@ -140,16 +147,18 @@ impl BarDraw for BoringBarDrawer {
         } else {
             // a bar without a known total has a looping 10 wide bar
             let draws = self.draws;
-            self.draws = draws + 1;
+            if !aborted {
+                self.draws = draws + 1;
+            }
 
             let start_point = draws % len;
-            let line = if finished {
+            let line = if finished && !aborted {
                 format!("{}{:=>len$}{}", GREEN, "", CLEAR, len = len)
             } else {
                 let mut buffer = String::new();
                 for i in 0..len {
                     if (i >= start_point && i < start_point + 10) || (i + len < start_point + 10) {
-                        write!(buffer, "{}={}", BLUE, CLEAR).unwrap()
+                        write!(buffer, "{}={}", if aborted { RED } else { BLUE }, CLEAR).unwrap()
                     } else {
                         buffer.push('-')
                     }
