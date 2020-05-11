@@ -44,7 +44,7 @@ impl BoringBarHandle {
     }
 }
 
-/// A builder for the boring bar. Right now you can only speicify a name and a total. Use a total
+/// A builder for the boring bar. Right now you can only specify a name and a total. Use a total
 /// of `0` for a looping progress bar.
 pub struct BoringBarBuilder {
     name: String,
@@ -172,5 +172,182 @@ impl BarDraw for BoringBarDrawer {
             writeln!(buffer, "{: >15} {} {}\x1b[0K", self.name, line, current,).unwrap();
         }
         buffer
+    }
+}
+
+struct BrailleState {
+    current: AtomicUsize,
+    total: AtomicUsize,
+    done: AtomicBool,
+    aborted: AtomicBool,
+}
+
+/// A handle to the boring bar that can used to update the progress of the bar.
+#[derive(Clone)]
+pub struct BrailleHandle {
+    state: Arc<BrailleState>,
+    multibar: BarState,
+}
+
+/// The handle used to update the progress bar.
+impl BrailleHandle {
+    /// Increment the progress by the given amount.
+    pub fn tick(&self) {
+        self.state.current.fetch_add(1, Ordering::Release);
+        self.multibar.redraw()
+    }
+
+    /// Finish rendering the bar. It will be redrawn once more and never again.
+    pub fn finish(&self) {
+        self.state.done.store(true, Ordering::Release);
+        self.multibar.redraw()
+    }
+
+    /// Finish rendering the bar. It will be redrawn once more and never again.
+    pub fn abort(&self) {
+        self.state.aborted.store(true, Ordering::Release);
+        self.multibar.redraw()
+    }
+}
+
+/// A builder for the boring bar. Right now you can only specify a name and a total. Use a total
+/// of `0` for a looping progress bar.
+pub struct BrailleBuilder {
+    name: String,
+    total: usize,
+}
+
+impl BrailleBuilder {
+    /// A progress bar with the total size. If the total is 0, progress will be shown as a rolling
+    /// update.
+    pub fn new(name: String, total: usize) -> BrailleBuilder {
+        BrailleBuilder { name, total }
+    }
+}
+
+impl BarBuild for BrailleBuilder {
+    type Handle = BrailleHandle;
+    type Drawer = BrailleDrawer;
+
+    fn build(self, multibar: BarState) -> (Self::Handle, Self::Drawer) {
+        let state = Arc::new(BrailleState {
+            current: AtomicUsize::new(0),
+            total: AtomicUsize::new(self.total),
+            done: AtomicBool::new(false),
+            aborted: AtomicBool::new(false),
+        });
+        let handle = BrailleHandle {
+            state: state.clone(),
+            multibar,
+        };
+        let drawer = BrailleDrawer {
+            name: self.name,
+            draws: 0,
+            last_ticker: 0,
+            state,
+            chars: BRAILE_SPINNER.chars().cycle().peekable(),
+        };
+        (handle, drawer)
+    }
+}
+
+use std::str::Chars;
+use std::iter::{Cycle, Peekable};
+
+/// This is the `BrailleDrawer`.
+pub struct BrailleDrawer {
+    name: String,
+    draws: usize,
+    last_ticker: usize,
+    state: Arc<BrailleState>,
+    chars: Peekable<Cycle<Chars<'static>>,>
+}
+
+
+const BRAILE_SPINNER: &str = "⠁⠁⠉⠙⠚⠒⠂⠂⠒⠲⠴⠤⠄⠄⠤⠠⠠⠤⠦⠖⠒⠐⠐⠒⠓⠋⠉⠈⠈";
+
+const BRAILE_PROGRESS_FLICKER: &str = "⡀⢀⣄⣠⣦⣴⣷⣾";
+const BRAILE_PROGRESS_FLICKER_CHARS: usize = 8;
+
+const BRAILE_PROGRESS_TICK: &str = " ⡀⢀⣀⣄⣠⣤⣦⣴⣶⣷⣾⣿";
+const BRAILE_PROGRESS_TICK_CHARS: usize = 13;
+
+const BRAILE_PROGRESS: &str = " ⡀⣀⣄⣤⣦⣶⣷⣿";
+const BRAILE_PROGRESS_CHARS: usize = 9;
+
+impl BarDraw for BrailleDrawer {
+    fn is_finished(&self) -> bool {
+        self.state.done.load(Ordering::Acquire)
+    }
+
+    fn draw(&mut self, params: &BarDrawParams) -> String {
+        let current = self.state.current.load(Ordering::Acquire);
+        let total = self.state.total.load(Ordering::Acquire);
+        let was_finished = self
+            .state
+            .done
+            .fetch_or(params.finished(), Ordering::Acquire);
+        let was_aborted = self
+            .state
+            .aborted
+            .fetch_or(params.aborted(), Ordering::Acquire);
+        let finished = was_finished || params.finished();
+        let aborted = was_aborted || params.aborted();
+        if total == 0 {
+            let colour = if aborted { RED } else if finished {GREEN} else {BLUE};
+
+            if self.last_ticker != current {
+                self.last_ticker = current;
+                self.draws += 1;
+                if self.draws % 2 == 0 {
+                    self.chars.next();
+                }
+            }
+
+            let char = if finished && !aborted { &'⣿' } else { self.chars.peek().unwrap() };
+
+            format!("{}{}{} {}\n", colour, char, CLEAR, self.name)
+        } else {
+            if self.last_ticker != current {
+                self.last_ticker = current;
+                self.draws += 1;
+            }
+
+            let colour = if aborted { RED } else if finished {GREEN} else {BLUE};
+            // let char = if current == 0 {
+            //     ' '
+            // } else {
+            //     let ix = (current * (BRAILE_PROGRESS_CHARS - 1)) / total;
+            //     BRAILE_PROGRESS.chars().nth(ix).unwrap()
+            // };
+            // format!("{}{}{}{} {}\n", colour, char, CLEAR, self.name)
+
+            let char = if current == 0 {
+                ' '
+            } else {
+                let tier = (current * 4) / total;
+                let n = 2 * tier + ((self.draws / 4) % 2);
+                BRAILE_PROGRESS_FLICKER.chars().nth(n).unwrap_or('⣿')
+            };
+            format!("{}{}{} {}\n", colour, char, CLEAR, self.name)
+
+            // let (char1, char2) = if current == 0 {
+            //     (' ', ' ')
+            // } else {
+            //     let tier = (current * 4) / total;
+            //     let (d1, d2) = match (self.draws / 4) % 4 {
+            //         0 => (1, 0),
+            //         1 => (2, 0),
+            //         2 => (0, 1),
+            //         _ => (0, 2),
+            //     };
+            //     let n1 = 3 * tier + d1;
+            //     let n2 = 3 * tier + d2;
+            //     (BRAILE_PROGRESS_TICK.chars().nth(n1).unwrap_or('⣿'),
+            //      BRAILE_PROGRESS_TICK.chars().nth(n2).unwrap_or('⣿')
+            //      )
+            // };
+            // format!("{}{}{}{} {}\n", colour, char1, char2, CLEAR, self.name)
+        }
     }
 }
