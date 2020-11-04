@@ -32,8 +32,8 @@ async fn yield_now() {
 fn main() {
     eprintln!("starting");
     let sizes = vec![
-        // 800_000, 1_384_291, 400_000, 213_321, 2_221_002, 392_292, 994_231,
-        1_800_000, 1_984_291, 2_400_000, 3_213_321, 3_821_002, 4_392_292, 4_994_231,
+        800_000, 1_384_291, 400_000, 213_321, 2_221_002, 392_292, 994_231,
+        // 1_800_000, 1_984_291, 2_400_000, 3_213_321, 3_821_002, 4_392_292, 4_994_231,
     ];
 
     let (handle, future) = progression::multi_bar();
@@ -61,10 +61,10 @@ fn main() {
 
     let stream = futures::stream::iter(bars)
         .map(|(i, size, mut handle)| async move {
-            let sz = if size > 111_1_200_000 { 0 } else { size };
+            let sz = if size > 1_200_000 { 0 } else { size };
             let builder = progression::draw::BrailleBuilder::new(format!("download {}", i), sz);
             if let Ok(bar) = handle.add_bar(builder) {
-                for i in 0..std::cmp::min(999_1_200_000, size) {
+                for i in 0..std::cmp::min(1_200_000, size) {
                     if i % 4096 == 0 {
                         if handle.is_finished() {
                             return;
@@ -73,6 +73,9 @@ fn main() {
                     // Delay::new(Duration::from_millis(1));
                     yield_now().await;
                     bar.tick();
+                }
+                if size > 1_200_000 {
+                    bar.abort();
                 }
                 bar.finish();
             }

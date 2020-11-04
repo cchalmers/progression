@@ -73,9 +73,9 @@ fn main() {
         800_000, 1_384_291, 400_000, 213_321, 2_221_002, 392_292, 994_231,
     ];
 
-    let (handle, future) = progression::multi_bar();
+    let (progress_handle, progress_future) = progression::multi_bar();
 
-    let ctrlc_handle = handle.clone();
+    let ctrlc_handle = progress_handle.clone();
     ctrlc::set_handler(move || {
         let ctrlc_handle = ctrlc_handle.clone();
         ctrlc_handle.abort_active();
@@ -104,14 +104,14 @@ fn main() {
         .cycle()
         .take(10)
         .enumerate()
-        .map(|(i, size)| (i, size, handle.clone()))
+        .map(|(i, size)| (i, size, progress_handle.clone()))
         .collect();
 
     let mut pool = LocalPool::new();
     let spawner = pool.spawner();
 
-    spawner.spawn_local(future).unwrap();
-    let stp_handle = handle.clone();
+    spawner.spawn_local(progress_future).unwrap();
+    let stp_handle = progress_handle.clone();
     spawner
         .spawn_local(StopStream.for_each(move |_| {
             let mut stp_handle = stp_handle.clone();
@@ -151,7 +151,7 @@ fn main() {
     spawner
         .spawn_local(async move {
             stream.collect::<Vec<_>>().await;
-            handle.finish();
+            progress_handle.finish();
             StopStream::stop()
         })
         .unwrap();

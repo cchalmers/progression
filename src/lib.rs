@@ -173,6 +173,8 @@ pub struct MultiBarState {
     stop: AtomicBool,
     /// Reference to our own waker so we can register new wakers.
     waker: AtomicWaker,
+    /// Should finished progress bars be moved to the top of the active stack.
+    finished_at_top: AtomicBool,
 }
 
 #[derive(Clone)]
@@ -224,6 +226,11 @@ impl MultiBarHandle {
         self.state.waker.wake();
     }
 
+    /// Progress bars move to the top when they're finished
+    pub fn finished_at_top(&self) {
+        self.state.finished_at_top.store(true, Ordering::Release);
+    }
+
     /// When until a render at the current state (or a later state) has been performed. Returns
     /// `None` if the `MultiBar` has been dropped.
     pub fn wait(&mut self) -> Option<WhenDone> {
@@ -250,6 +257,7 @@ pub fn multi_bar() -> (MultiBarHandle, MultiBarFuture) {
         changed: AtomicBool::new(false),
         abort_active: AtomicBool::new(false),
         stop: AtomicBool::new(false),
+        finished_at_top: AtomicBool::new(false),
         waker: AtomicWaker::new(),
     });
 
@@ -376,7 +384,7 @@ impl Future for MultiBarFuture {
             {
                 params.aborted = true;
                 finished.append(active);
-            } else {
+            } else if runner.state.finished_at_top.load(Ordering::Acquire) {
                 let mut removed = 0;
                 for i in 0..active.len() {
                     let i = i - removed;
