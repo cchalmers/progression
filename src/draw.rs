@@ -37,7 +37,7 @@ impl BoringBarHandle {
         self.incr(1)
     }
 
-    /// Finish rendering the bar. It will be redrawn once more and never again.
+    /// Mark the bar as finished.
     pub fn finish(&self) {
         self.state.finished.store(true, Ordering::Release);
         self.multibar.redraw()
@@ -123,7 +123,7 @@ impl BarDraw for BoringBarDrawer {
                 (len as f64 * (current as f64 / total as f64)).round() as usize,
             );
             let remaining = len - used;
-            let bar_colour = if aborted {
+            let bar_colour = if aborted && !finished {
                 RED
             } else if finished {
                 if remaining == 0 {
